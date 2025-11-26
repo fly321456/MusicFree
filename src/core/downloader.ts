@@ -13,9 +13,10 @@ import { atom, getDefaultStore, useAtomValue } from "jotai";
 import { nanoid } from "nanoid";
 import path from "path-browserify";
 import { useEffect, useState } from "react";
-import { copyFile, downloadFile, exists, unlink } from "react-native-fs";
+import { copyFile, downloadFile, exists, unlink, writeFile } from "react-native-fs";
 import LocalMusicSheet from "./localMusicSheet";
 import { IPluginManager } from "@/types/core/pluginManager";
+import { trace } from "@/utils/log";
 
 
 export enum DownloadStatus {
@@ -145,6 +146,95 @@ class Downloader extends EventEmitter<IEvents> implements IInjectable {
             errorReason: reason,
         });
         this.emit(DownloaderEvent.DownloadTaskError, reason, musicItem, error);
+    }
+
+    /**
+     * 将歌词文件保存到音乐文件同目录下，使用与音乐文件相同的文件名（扩展名为.lrc）
+     * 这样其他音乐软件就能找到歌词文件了
+     */
+    private async saveLyricToMusicDirectory(musicItem: IMusic.IMusicItem, musicFilePath: string) {
+        try {
+            // 获取歌词
+            const plugin = this.pluginManagerService.getByMedia(musicItem);
+            if (!plugin) {
+                return;
+            }
+
+            const lrcSource = await plugin.methods.getLyric(musicItem).catch(() => null);
+            if (!lrcSource?.rawLrc) {
+                return;
+            }
+
+            // 移除 file:// 前缀（如果存在）以便正确处理路径
+            const normalizedPath = musicFilePath.replace(/^file:\/\//, "");
+            
+            // 获取音乐文件的目录和文件名（不含扩展名）
+            const musicDir = path.dirname(normalizedPath);
+            const musicFileName = path.basename(normalizedPath);
+            const lastDotIndex = musicFileName.lastIndexOf(".");
+            const musicFileNameWithoutExt = lastDotIndex > 0 
+                ? musicFileName.substring(0, lastDotIndex) 
+                : musicFileName;
+            
+            // 歌词文件路径：与音乐文件同目录，文件名相同，扩展名为.lrc
+            const lyricFilePath = addFileScheme(`${musicDir}/${musicFileNameWithoutExt}.lrc`);
+
+            // 保存歌词文件
+            await writeFile(lyricFilePath, lrcSource.rawLrc, "utf8");
+            trace("歌词文件已保存到音乐文件同目录", lyricFilePath);
+        } catch (err) {
+            // 歌词保存失败不影响主流程
+            trace("保存歌词文件失败", err);
+        }
+    }
+
+    /**
+     * 将封面图片保存到音乐文件同目录下，使用与音乐文件相同的文件名（扩展名为.jpg）
+     * 这样每个音乐文件都有自己的封面，不会互相覆盖
+     */
+    private async saveCoverToMusicDirectory(musicItem: IMusic.IMusicItem, musicFilePath: string) {
+        try {
+            // 检查是否有封面图片URL
+            const artworkUrl = musicItem.artwork;
+            if (!artworkUrl || !artworkUrl.trim()) {
+                return;
+            }
+
+            // 移除 file:// 前缀（如果存在）以便正确处理路径
+            const normalizedPath = musicFilePath.replace(/^file:\/\//, "");
+            const musicDir = path.dirname(normalizedPath);
+            const musicFileName = path.basename(normalizedPath);
+            
+            // 获取音乐文件名（不含扩展名）
+            const lastDotIndex = musicFileName.lastIndexOf(".");
+            const musicFileNameWithoutExt = lastDotIndex > 0 
+                ? musicFileName.substring(0, lastDotIndex) 
+                : musicFileName;
+            
+            // 封面文件路径：与音乐文件同目录，文件名相同，扩展名为.jpg
+            const coverFilePath = addFileScheme(`${musicDir}/${musicFileNameWithoutExt}.jpg`);
+
+            // 如果封面是网络URL，下载它
+            if (artworkUrl.startsWith("http://") || artworkUrl.startsWith("https://")) {
+                const { promise } = downloadFile({
+                    fromUrl: artworkUrl,
+                    toFile: coverFilePath,
+                    background: true,
+                });
+                await promise;
+                trace("封面图片已保存到音乐文件同目录", coverFilePath);
+            } else if (artworkUrl.startsWith("file://") || artworkUrl.startsWith("/")) {
+                // 如果是本地文件，直接复制
+                const sourcePath = artworkUrl.startsWith("file://") 
+                    ? artworkUrl 
+                    : addFileScheme(artworkUrl);
+                await copyFile(sourcePath, coverFilePath);
+                trace("封面图片已复制到音乐文件同目录", coverFilePath);
+            }
+        } catch (err) {
+            // 封面保存失败不影响主流程
+            trace("保存封面图片失败", err);
+        }
     }
 
     /** 匹配文件后缀 */
@@ -337,6 +427,18 @@ class Downloader extends EventEmitter<IEvents> implements IInjectable {
             patchMediaExtra(musicItem, {
                 downloaded: true,
                 localPath: targetDownloadPath,
+            });
+
+            // 尝试下载并保存歌词文件到音乐文件同目录
+            this.saveLyricToMusicDirectory(musicItem, targetDownloadPath).catch(err => {
+                // 歌词下载失败不影响主流程，只记录日志
+                trace("下载歌词失败", err);
+            });
+
+            // 尝试下载并保存封面图片到音乐文件同目录
+            this.saveCoverToMusicDirectory(musicItem, targetDownloadPath).catch(err => {
+                // 封面下载失败不影响主流程，只记录日志
+                trace("下载封面失败", err);
             });
 
             this.markTaskAsCompleted(musicItem);

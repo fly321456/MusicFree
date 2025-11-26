@@ -26,6 +26,6 @@ class MainActivity : ReactActivity() {
   // https://reactnavigation.org/docs/getting-started/#installing-dependencies-into-a-bare-react-native-project
   override fun onCreate(savedInstanceState: Bundle?) {
       SplashScreenManager.registerOnActivity(this)
-      super.onCreate(null);
+      super.onCreate(savedInstanceState);
   }
 }
