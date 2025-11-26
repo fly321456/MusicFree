@@ -448,6 +448,148 @@ module.exports = {
   },
 
   /**
+   * 获取歌单详情和歌曲列表
+   * @param {Object} sheetItem - 歌单项
+   * @param {number} page - 页码，从1开始
+   */
+  async getMusicSheetInfo(sheetItem, page = 1) {
+    try {
+      const playlistId = String(sheetItem.id || '');
+      if (!playlistId) {
+        throw new Error('无效的歌单ID');
+      }
+
+      const limit = 50; // 每页50首
+      const offset = (page - 1) * limit;
+
+      // 方案1: 尝试使用 v3 API 获取歌单详情（支持更多歌曲和分页）
+      let response;
+      let allTracks = [];
+      let playlistInfo = null;
+
+      try {
+        response = await fetchWithRetry(
+          `https://music.163.com/api/v3/playlist/detail?id=${playlistId}&n=10000`,
+          {
+            method: 'GET',
+            headers: {
+              'User-Agent': COMMON_HEADERS['User-Agent'],
+              'Referer': 'https://y.music.163.com/',
+              'Origin': 'https://y.music.163.com/'
+            }
+          }
+        );
+
+        if (response.playlist) {
+          playlistInfo = response.playlist;
+          
+          // v3 API 返回 trackIds，需要分批获取歌曲详情
+          if (response.playlist.trackIds && Array.isArray(response.playlist.trackIds)) {
+            const trackIds = response.playlist.trackIds.map(item => item.id);
+            
+            // 计算当前页需要获取的歌曲范围
+            const startIndex = offset;
+            const endIndex = Math.min(offset + limit, trackIds.length);
+            const pageTrackIds = trackIds.slice(startIndex, endIndex);
+
+            // 分批获取歌曲详情（每批200首）
+            const batchSize = 200;
+            for (let i = 0; i < pageTrackIds.length; i += batchSize) {
+              const batch = pageTrackIds.slice(i, i + batchSize);
+              try {
+                const songsResponse = await fetchWithRetry(
+                  `https://music.163.com/api/song/detail/?ids=[${batch.join(',')}]`,
+                  {
+                    method: 'GET',
+                    headers: {
+                      'User-Agent': COMMON_HEADERS['User-Agent'],
+                      'Referer': 'https://y.music.163.com/',
+                      'Origin': 'https://y.music.163.com/'
+                    }
+                  }
+                );
+
+                if (songsResponse.songs && songsResponse.songs.length > 0) {
+                  allTracks.push(...songsResponse.songs);
+                }
+              } catch (batchError) {
+                console.log(`获取第 ${Math.floor(i / batchSize) + 1} 批歌曲失败:`, batchError.message);
+              }
+            }
+          } else if (response.playlist.tracks && Array.isArray(response.playlist.tracks)) {
+            // 如果直接返回了 tracks，使用它们
+            const tracks = response.playlist.tracks;
+            const startIndex = offset;
+            const endIndex = Math.min(offset + limit, tracks.length);
+            allTracks = tracks.slice(startIndex, endIndex);
+          }
+        }
+      } catch (v3Error) {
+        console.log('v3 API 失败，尝试旧版 API:', v3Error.message);
+      }
+
+      // 方案2: 如果 v3 API 失败，尝试旧版 API
+      if (allTracks.length === 0 && !playlistInfo) {
+        try {
+          response = await fetchWithRetry(
+            `https://music.163.com/api/playlist/detail?id=${playlistId}`,
+            {
+              method: 'GET',
+              headers: {
+                'User-Agent': COMMON_HEADERS['User-Agent'],
+                'Referer': COMMON_HEADERS['Referer']
+              }
+            }
+          );
+
+          if (response.playlist) {
+            playlistInfo = response.playlist;
+            const tracks = response.playlist.tracks || [];
+            
+            // 分页处理
+            const startIndex = offset;
+            const endIndex = Math.min(offset + limit, tracks.length);
+            allTracks = tracks.slice(startIndex, endIndex);
+          }
+        } catch (error) {
+          console.log('旧版 API 也失败:', error.message);
+        }
+      }
+
+      if (!playlistInfo) {
+        throw new Error('歌单不存在或无法访问');
+      }
+
+      // 构建返回结果
+      const totalTracks = playlistInfo.trackIds?.length || playlistInfo.trackCount || allTracks.length;
+      const isEnd = totalTracks <= (page * limit) || allTracks.length < limit;
+
+      return {
+        sheetItem: {
+          id: String(playlistInfo.id || sheetItem.id),
+          title: playlistInfo.name || sheetItem.title || '未知歌单',
+          description: playlistInfo.description || sheetItem.description || '',
+          coverImg: playlistInfo.coverImgUrl || playlistInfo.picUrl || sheetItem.coverImg || '',
+          artwork: playlistInfo.coverImgUrl || playlistInfo.picUrl || sheetItem.artwork || '',
+          artist: playlistInfo.creator?.nickname || sheetItem.artist || '未知用户',
+          playCount: playlistInfo.playCount || sheetItem.playCount || 0,
+          worksNum: totalTracks || sheetItem.worksNum || 0,
+          platform: '网易云音乐'
+        },
+        musicList: allTracks.map(track => normalizeMusicItem(track)),
+        isEnd: isEnd
+      };
+    } catch (error) {
+      console.error('获取歌单详情失败:', error);
+      return {
+        sheetItem: sheetItem,
+        musicList: [],
+        isEnd: true
+      };
+    }
+  },
+
+  /**
    * 导入歌单
    * @param {string} urlLike - 歌单链接或ID
    */
